@@ -4,7 +4,7 @@ import heapq
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from .config import (
+from config import (
     EnvFields, VSET, ENV_DATA_PATH, EF_CO2, EF_BC, 
     CostParams, VesselSpec, CostWeights,
     LAT_MIN, LAT_MAX, LON_MIN, LON_MAX # v5.0의 극지방 시각화용

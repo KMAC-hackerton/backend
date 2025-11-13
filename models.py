@@ -2,7 +2,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from .config import (
+from config import (
     VesselSpec, CostWeights, CostParams, EnvFields, 
     EF_CO2, EF_BC, MIX_PHYS_AND_DL, KAPPA_UNCERT, device
 )
