@@ -13,7 +13,7 @@ from utils import (
 class Service:
     def __init__(self):
         pass
-    async def get_optimal_route(self, req: RouteRequest, F: EnvFields, 
+    def get_optimal_route(self, req: RouteRequest, F: EnvFields, 
                       cost_model: NeuralCostFieldDL, 
                       phys: PhysicalCost) -> RouteResponse:
         T, Y, X = F.SIC.shape
@@ -31,7 +31,7 @@ class Service:
         print(f"Finding route from {start_node} to {goal_node}...")
 
         # 2. 핵심 로직: A* 알고리즘 호출
-        path, speeds, total_cost = await astar_route_with_speeds(
+        path, speeds, total_cost = astar_route_with_speeds(
             F, cost_model, start_node, goal_node, VSET
         )
 
@@ -43,13 +43,13 @@ class Service:
 
         save_vis_path = DEFAULT_SAVE_PATH
         try:
-            await plot_route_visualization(F, cost_model, path, savepath=save_vis_path)
+            plot_route_visualization(F, cost_model, path, savepath=save_vis_path)
         except Exception as e:
             print(f"Warning: Visualization failed. {e}")
             save_vis_path = "N/A (Plotting failed)"
         
         # 4. 부가 로직: 비용 요약
-        cost_summary_df = await summarize_path_costs(phys, F, path, speeds)
+        cost_summary_df = summarize_path_costs(phys, F, path, speeds)
         
         # 안전 처리: speeds 또는 cost_summary_df가 None일 수 있으므로 기본값 부여
         speeds_list = [] if speeds is None else [float(v) for v in speeds]
