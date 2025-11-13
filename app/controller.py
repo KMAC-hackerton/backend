@@ -1,13 +1,17 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Depends
 import numpy as np
 
+from typing import Annotated
 from app.schemas import RouteRequest, RouteResponse
 from app.services import Service
 
 api_router = APIRouter()
 
 @api_router.post("/api/v1/find_route")
-def find_optimal_route(route_request: RouteRequest, request: Request, service: Service):
+def find_optimal_route(
+    route_request: RouteRequest, 
+    request: Request, 
+    service: Annotated[Service, Depends()]):
     F = request.app.state.env_fields
     cost_model = request.app.state.ncf_cost_model
     phys_cost = request.app.state.phys_cost
