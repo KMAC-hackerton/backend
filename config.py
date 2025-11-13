@@ -1,4 +1,3 @@
-# app/config.py
 import os
 import torch
 from dataclasses import dataclass
@@ -25,8 +24,6 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTDIR = os.path.join(BASE_DIR, "outputs")
 os.makedirs(OUTDIR, exist_ok=True)
 
-# --- (중요) API가 로드할 파일 경로 ---
-# 이 파일들은 반드시 사전에 생성되어 있어야 합니다.
 MODEL_SAVE_PATH = os.path.join(OUTDIR, "ncf_model_weights.pth")
 ENV_DATA_PATH = os.path.join(OUTDIR, "env_fields.npz")
 DEFAULT_SAVE_PATH = os.path.join(OUTDIR, "route_result.png")
