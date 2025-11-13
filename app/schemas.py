@@ -1,22 +1,20 @@
+# app/schemas.py
 from pydantic import BaseModel, Field
+from typing import List, Tuple, Dict, Any
 
-class PredictionRequest(BaseModel):
-    """
-    Request model for making predictions.
+class RouteRequest(BaseModel):
+    t_start_idx: int
+    y_start: int
+    x_start: int
+    t_goal_idx: int
+    y_goal: int
+    x_goal: int
 
-    Attributes:
-        departure_coordinates (list[float]): A list containing the latitude and longitude of the departure point.
-        destination_coordinates (list[float]): A list containing the latitude and longitude of the arrival point.
-        fuel (float)
-        black_carbon (float)
-        noise (float)
-        risk (float)
-    """
-
-    departure_coordinates: list[float]
-    destination_coordinates: list[float]
-    fuel: float
-    black_carbon: float
-    noise: float
-    risk: float
-    
+class RouteResponse(BaseModel):
+    status: str
+    path_nodes: List[Tuple[int, int, int]]
+    speeds_kn: List[float]
+    total_cost: float
+    path_length: int
+    visualization_file: str
+    cost_summary: List[Dict[str, Any]]
