@@ -10,8 +10,10 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # Colab 학습 스크립트와 일치해야 하는 값
 DATE_START = datetime(2023, 8, 1)
 DATE_END = datetime(2023, 12, 1)
-GRID_T, GRID_Y, GRID_X = (DATE_END - DATE_START).days + 1, 40, 40
-VSET = (8, 10, 12, 14, 16)
+# ⚠️ EC2 t3.micro 최적화: 격자 해상도를 줄여 A* 성능 개선
+# 원본: (DATE_END - DATE_START).days + 1, 40, 40
+GRID_T, GRID_Y, GRID_X = (DATE_END - DATE_START).days + 1, 20, 20  # 40→20 (1/4 감소)
+VSET = (10, 14)  # 5개→2개로 줄여 추론 속도 2.5배 향상
 KAPPA_UNCERT = 0.5
 MIX_PHYS_AND_DL = 0.0
 

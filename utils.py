@@ -38,7 +38,7 @@ def load_processed_env_fields() -> EnvFields:
         raise RuntimeError(f"Error loading processed env data: {e}")
 
 # --- A* 경로 탐색 함수 ---
-def astar_route_with_speeds(F, cost_model, start, goal, vset, d_cell_nm=2.7):
+def astar_route_with_speeds(F, cost_model, start, goal, vset, d_cell_nm=2.7, max_iterations=50000):
     # (v3.4의 astar_route_with_speeds 함수 코드)
     T,Y,X = F.SIC.shape
     (t0,y0,x0), (tG,yG,xG) = start, goal
@@ -47,7 +47,14 @@ def astar_route_with_speeds(F, cost_model, start, goal, vset, d_cell_nm=2.7):
     NEIGH = [(-1,0),(1,0),(0,-1),(0,1),(0,0)]
     pq = []; heapq.heappush(pq, (h(t0,y0,x0), 0.0, (t0,y0,x0)))
     g_cost, parent, best_speed_to = {(t0,y0,x0):0.0}, {}, {}
+    iteration_count = 0
     while pq:
+        iteration_count += 1
+        if iteration_count > max_iterations:
+            print(f"⚠️ A* 조기 종료: {max_iterations}회 반복 초과 (목표 미도달)")
+            return None, None, float("inf")
+        if iteration_count % 5000 == 0:
+            print(f"[A*] 진행: {iteration_count}회, 큐={len(pq)}, 방문={len(g_cost)}")
         f, gc, node = heapq.heappop(pq)
         t,y,x = node
         if node == (tG,yG,xG):
