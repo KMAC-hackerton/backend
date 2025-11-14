@@ -1,219 +1,280 @@
-# app/utils.py
-import math
 import heapq
+import math
+from typing import Tuple, List, Optional, Any, TYPE_CHECKING
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from config import (
-    EnvFields, VSET, ENV_DATA_PATH, EF_CO2, EF_BC, 
-    CostParams, VesselSpec, CostWeights,
-    LAT_MIN, LAT_MAX, LON_MIN, LON_MAX # v5.0의 극지방 시각화용
-)
-from models import softplus, PhysicalCost
+
+import config
+from models import EnvFields, PhysicalCost, NeuralCostFieldDL
 
 try:
-    import cartopy.crs as ccrs
-    import cartopy.feature
+    import cartopy.crs as ccrs  # type: ignore[import]
+    import cartopy.feature as cfeature  # type: ignore[import]
 except ImportError:
-    print("🚨 'cartopy' 모듈을 찾을 수 없습니다. 시각화는 2D 격자 맵으로 대체됩니다.")
     ccrs = None
+    cfeature = None
 
-# ----------------- (중요) 처리된 데이터 로더 -----------------
+if TYPE_CHECKING:
+    from cartopy.mpl.geoaxes import GeoAxesSubplot  # type: ignore[import]
+else:
+    GeoAxesSubplot = Any
+
+
 def load_processed_env_fields() -> EnvFields:
-    """
-    Colab/scripts가 생성한 .npz 파일에서 환경 데이터를 로드합니다.
-    """
     try:
-        data = np.load(ENV_DATA_PATH)
-        return EnvFields(
-            SIC=data['SIC'], Hs=data['Hs'], U10=data['U10'],
-            dist_ice=data['dist_ice'], depth=data['depth'],
-            bio_mask=data['bio_mask'], risk_grad_ice=data['risk_grad_ice'],
-            forbid_mask=data['forbid_mask']
-        )
-    except FileNotFoundError:
-        raise RuntimeError(f"Processed env data not found at {ENV_DATA_PATH}. "
-                           "Colab에서 데이터를 전처리하고 outputs/ 폴더에 저장했는지 확인하세요.")
-    except Exception as e:
-        raise RuntimeError(f"Error loading processed env data: {e}")
+        data = np.load(config.ENV_DATA_PATH)
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Environment data not found at {config.ENV_DATA_PATH}") from exc
+    return EnvFields(
+        SIC=data['SIC'],
+        Hs=data['Hs'],
+        U10=data['U10'],
+        dist_ice=data['dist_ice'],
+        depth=data['depth'],
+        bio_mask=data['bio_mask'],
+        risk_grad_ice=data['risk_grad_ice'],
+        forbid_mask=data['forbid_mask'],
+    )
 
-# --- A* 경로 탐색 함수 ---
-# -------------------- A* 경로 탐색 함수 --------------------
-def astar_route_with_speeds(F, cost_model, start, goal, vset, d_cell_nm=2.7):
-    """
-    시간 확장 A* 알고리즘을 사용하여 환경 비용이 최소인 경로를 찾습니다.
-    :param F: EnvFields 객체 (환경 데이터)
-    :param cost_model: NeuralCostFieldDL 객체 (비용 예측 모델)
-    :param start: 시작 노드 (t0, y0, x0)
-    :param goal: 목표 노드 (tG, yG, xG)
-    :param vset: 후보 속력 집합 [kn]
-    :param d_cell_nm: 격자 셀 간 거리 (해리)
-    :return: path, speeds, total_cost
-    """
-    T,Y,X = F.SIC.shape
-    (t0,y0,x0), (tG,yG,xG) = start, goal
-    
-    # 경계 검사 함수
-    def inb(t,y,x): return 0<=t<T and 0<=y<Y and 0<=x<X
-    
-    # 휴리스틱 함수 (직선 거리)
-    def h(t,y,x): return math.hypot(y-yG, x-xG)*d_cell_nm*1.0
-    
-    # 이웃 노드 (상하좌우 및 제자리)
-    NEIGH = [(-1,0),(1,0),(0,-1),(0,1),(0,0)]
-    
-    # 우선순위 큐: (f_cost, g_cost, node)
-    pq = []; heapq.heappush(pq, (h(t0,y0,x0), 0.0, (t0,y0,x0)))
-    
-    g_cost, parent, best_speed_to = {(t0,y0,x0):0.0}, {}, {}
-    
+
+def astar_route_with_speeds(
+    F: EnvFields,
+    cost_model: NeuralCostFieldDL,
+    start: Tuple[int, int, int],
+    goal: Tuple[int, int, int],
+    vset: Tuple[float, ...] = config.VSET,
+    d_cell_nm: float = 2.7,
+    max_iterations: int = 50000,
+) -> Tuple[Optional[List[Tuple[int, int, int]]], Optional[List[float]], float]:
+    T, Y, X = F.SIC.shape
+    (t0, y0, x0), (tG, yG, xG) = start, goal
+
+    def in_bounds(t, y, x):
+        return 0 <= t < T and 0 <= y < Y and 0 <= x < X
+
+    def heuristic(t, y, x):
+        spatial = abs(y - yG) + abs(x - xG)
+        time_dist = max(0, tG - t)
+        return spatial * d_cell_nm * 0.5 + time_dist * 2.0
+
+    pq = []
+    heapq.heappush(pq, (heuristic(t0, y0, x0), 0.0, (t0, y0, x0)))
+    g_cost = {(t0, y0, x0): 0.0}
+    parent = {}
+    best_speed = {}
+    visited = set()
+    iteration = 0
+
     while pq:
-        f, gc, node = heapq.heappop(pq)
-        t,y,x = node
-        
-        # 목표 도달
-        if node == (tG,yG,xG):
-            path=[node]; speeds=[]
+        iteration += 1
+        if iteration > max_iterations:
+            print(f"⚠️ A* exceeded {max_iterations} iterations")
+            return None, None, float('inf')
+        if iteration % 5000 == 0:
+            print(f"[A*] Iter {iteration}, queue={len(pq)}, visited={len(visited)}")
+        _, gc, node = heapq.heappop(pq)
+        if node in visited:
+            continue
+        visited.add(node)
+        t, y, x = node
+        if node == (tG, yG, xG):
+            path = [node]
+            speeds = []
             while node in parent:
-                speeds.append(best_speed_to[node]); node=parent[node]; path.append(node)
+                speeds.append(best_speed[node])
+                node = parent[node]
+                path.append(node)
             return list(reversed(path)), list(reversed(speeds)), gc
-            
-        # 다음 시간 단계 (t+1)
-        nt = t+1
-        
-        # 현재 시간에서 이웃 노드로 이동 탐색
-        for dy,dx in NEIGH:
-            ny,nx = y+dy, x+dx
-            
-            # 격자 및 시간 경계 검사
-            if not inb(nt,ny,nx): continue
-            
-            best_c, best_v = float("inf"), None
-            
-            # 후보 속력별 최소 비용 선택
+        nt = t + 1
+        if nt >= T:
+            continue
+        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1), (0, 0)]:
+            ny, nx = y + dy, x + dx
+            if not in_bounds(nt, ny, nx):
+                continue
+            nnode = (nt, ny, nx)
+            if nnode in visited:
+                continue
+            best_c = float('inf')
+            best_v = None
             for v in vset:
-                # 모델을 통해 엣지 비용 예측
-                c = cost_model.predict(2.7, float(v), F, t, ny, nx) 
-                if c < best_c: best_c, best_v = c, v
-                
-            # 새로운 g_cost 계산 및 갱신
-            ng = gc + best_c; nnode = (nt,ny,nx)
-            
-            if ng < g_cost.get(nnode, float("inf")):
-                g_cost[nnode]=ng; parent[nnode]=(t,y,x); best_speed_to[nnode]=best_v
-                heapq.heappush(pq, (ng + h(nt,ny,nx), ng, nnode))
-                
-    return None, None, float("inf")
+                c = cost_model.predict(d_cell_nm, float(v), F, nt, ny, nx)
+                if c < best_c:
+                    best_c = c
+                    best_v = v
+            ng = gc + best_c
+            if ng < g_cost.get(nnode, float('inf')):
+                g_cost[nnode] = ng
+                parent[nnode] = node
+                best_speed[nnode] = best_v
+                heapq.heappush(pq, (ng + heuristic(nt, ny, nx), ng, nnode))
+    return None, None, float('inf')
 
-# --- 리포팅/시각화 함수 ---
-def compute_cost_map(F, cost_model, t, vset=VSET):
-    # (v3.4의 compute_cost_map 함수 코드)
-    T,Y,X = F.SIC.shape
+
+def compute_cost_map(F: EnvFields, cost_model: NeuralCostFieldDL, t: int, vset: Tuple[float, ...] = config.VSET) -> np.ndarray:
+    T, Y, X = F.SIC.shape
     assert 0 <= t < T
-    cost_map = np.full((Y,X), np.nan, dtype=np.float32)
+    cost_map = np.full((Y, X), np.nan, dtype=np.float32)
     for y in range(Y):
         for x in range(X):
-            if F.forbid_mask[t,y,x] > 0.5:
+            if F.forbid_mask[t, y, x] > 0.5:
                 continue
-            best = float("inf")
+            best = float('inf')
             for v in vset:
                 c = cost_model.predict(2.7, float(v), F, t, y, x)
-                if c < best: best = c
-            cost_map[y,x] = best
+                if c < best:
+                    best = c
+            cost_map[y, x] = best
     return cost_map
 
-def make_latlon_grids(Y, X, lat_min, lat_max, lon_min, lon_max):
-    # (v5.0의 헬퍼 함수)
-    lats = np.linspace(lat_max, lat_min, Y) # Y가 북쪽(lat_max)에서 시작
-    lons = np.linspace(lon_min, lon_max, X)
+
+def make_latlon_grids(Y: int, X: int, lat_min: float, lat_max: float, lon_min: float, lon_max: float) -> Tuple[np.ndarray, np.ndarray]:
+    lats = np.linspace(lat_min, lat_max, Y, dtype=np.float32)
+    lons = np.linspace(lon_min, lon_max, X, dtype=np.float32)
     return lats, lons
 
-def plot_route_visualization(F, cost_model, path, savepath, vset=VSET):
-    t_for_heat = path[0][0] if path else 0
-    C = compute_cost_map(F, cost_model, t_for_heat, vset=vset)
+
+def plot_route_visualization(
+    F: EnvFields,
+    cost_model: NeuralCostFieldDL,
+    path: List[Tuple[int, int, int]],
+    savepath: str,
+    vset: Tuple[float, ...] = config.VSET,
+):
+    if not path:
+        return
+    t_for_heat = path[0][0]
+    C = compute_cost_map(F, cost_model, t_for_heat, vset)
     C[F.forbid_mask[t_for_heat] > 0.5] = np.nan
-    vmin = np.nanpercentile(C, 5); vmax = np.nanpercentile(C, 95)
-    
-    Y, X = C.shape
-    title = f"Optimized Arctic Route (Day {t_for_heat})"
+    vmin = float(np.nanpercentile(C, 5))
+    vmax = float(np.nanpercentile(C, 95))
 
-    if ccrs:
-        fig = plt.figure(figsize=(9, 9))
-        stereo_proj = ccrs.NorthPolarStereo(central_longitude=0)
-        ax = fig.add_subplot(1, 1, 1, projection=stereo_proj)
-        data_crs = ccrs.PlateCarree()
-        ax.set_extent([LON_MIN, LON_MAX, LAT_MIN, LAT_MAX], data_crs)
-        ax.set_title(title)
-        ax.coastlines(resolution='50m', color='black', linewidth=0.8)
-        ax.add_feature(cartopy.feature.LAND, facecolor='lightgray')
-        ax.add_feature(cartopy.feature.OCEAN, facecolor='skyblue')
-        
-        lats, lons = make_latlon_grids(Y, X, LAT_MIN, LAT_MAX, LON_MIN, LON_MAX)
-        lon_2d, lat_2d = np.meshgrid(lons, lats)
-        
-        im = ax.pcolormesh(lon_2d, lat_2d, C, transform=data_crs,
-                           cmap='magma', vmin=vmin, vmax=vmax, alpha=0.7, shading='auto')
-        
-        lats_of_path = np.array([lats[y] for _, y, _ in path])
-        lons_of_path = np.array([lons[x] for _, _, x in path])
-        
-        ax.plot(lons_of_path, lats_of_path, color='cyan', linewidth=3, 
-                marker='o', markersize=4, transform=data_crs, label="Optimized Route")
-        
-        fig.colorbar(im, ax=ax, orientation='vertical', label='Edge cost (a.u.)', pad=0.05)
-        ax.gridlines(draw_labels=True, dms=True, x_inline=False, y_inline=False)
-    
-    # Cartopy 없을 시 (v3.4)
-    else:
-        fig = plt.figure(figsize=(7, 6))
-        ax = fig.add_subplot(1, 1, 1)
-        im = ax.imshow(C, origin="lower", cmap="magma", vmin=vmin, vmax=vmax)
-        ax.set_title(title); ax.set_xlabel("x"); ax.set_ylabel("y")
-        cb = plt.colorbar(im, ax=ax); cb.set_label("Edge cost (a.u.)")
-        if path:
-            ys = [y for (_,y,_) in path]; xs = [x for (_,_,x) in path]
-            ax.plot(xs, ys, color="red", lw=2.5)
-
+    fig, ax = plt.subplots(figsize=(7, 6))
+    im = ax.imshow(C, origin="lower", cmap="magma", vmin=vmin, vmax=vmax)
+    if path:
+        ys = [y for _, y, _ in path]
+        xs = [x for _, _, x in path]
+        ax.plot(xs, ys, color="cyan", lw=2.5)
+    ax.set_title(f"Optimized Arctic Route (Day {t_for_heat})")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    cb = fig.colorbar(im, ax=ax)
+    cb.set_label("Edge cost (a.u.)")
+    fig.tight_layout()
     fig.savefig(savepath, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
 
-def edge_cost_breakdown(phys: PhysicalCost, F: EnvFields, t, y, x, v_kn, d_nm=2.7):
-    ef_co2 = EF_CO2.get(phys.vessel.fuel_type, 3.206)
-    ef_bc = EF_BC.get(phys.vessel.fuel_type, 2.5e-3)
-    P = phys.p
-    SIC, Hs, U10 = F.SIC[t,y,x], F.Hs[t,y,x], F.U10[t,y,x]
-    dist_ice, bio = F.dist_ice[t,y,x], F.bio_mask[t,y,x]
-    grad, forbid = F.risk_grad_ice[t,y,x], F.forbid_mask[t,y,x]
-    dt_h = d_nm / max(v_kn, 1e-6)
-    mf = phys.fuel_rate(v_kn, Hs, SIC, U10) * dt_h
-    co2e = mf * ef_co2
-    W_ice = 1/(1+np.exp(-P.gamma1*(SIC-0.15))) + np.exp(-P.gamma2*dist_ice)
-    bc = mf * ef_bc * W_ice
-    SL = P.a0 + P.a2*(v_kn**P.p)
-    noise = SL * bio * dt_h
-    risk = 0.5*(1/(1+np.exp(-P.kappa1*(SIC-P.s_c)))) + 0.3*softplus(Hs-P.Hs_c) + 0.2*softplus(grad-P.g_c)
-    breakdown = {
-        "CO2e": phys.w.w_fuel * co2e,
-        "BC": phys.w.w_bc * bc,
-        "Noise": phys.w.w_noise * noise,
-        "Risk": phys.w.w_risk * risk,
-        "Forbidden": phys.w.bigM if forbid > 0.5 else 0.0
-    }
-    return breakdown
+def plot_route_on_polar_stereo(
+    F: EnvFields,
+    cost_model: NeuralCostFieldDL,
+    path: List[Tuple[int, int, int]],
+    savepath: str,
+    *,
+    lat_min: float = config.LAT_MIN,
+    lat_max: float = config.LAT_MAX,
+    lon_min: float = config.LON_MIN,
+    lon_max: float = config.LON_MAX,
+    vset: Tuple[float, ...] = config.VSET,
+):
+    if ccrs is None or cfeature is None:
+        print("[polar] Cartopy not available; skipping polar visualization")
+        return
+    if not path:
+        print("[polar] Empty path; skipping polar visualization")
+        return
+    t_for_heat = path[0][0]
+    C = compute_cost_map(F, cost_model, t_for_heat, vset)
+    C[F.forbid_mask[t_for_heat] > 0.5] = np.nan
+    vmin = float(np.nanpercentile(C, 5))
+    vmax = float(np.nanpercentile(C, 95))
 
-def summarize_path_costs(phys: PhysicalCost, F: EnvFields, path, speeds):
+    fig = plt.figure(figsize=(9, 9))
+    stereo_proj = ccrs.NorthPolarStereo(central_longitude=0)
+    ax: Any = fig.add_subplot(1, 1, 1, projection=stereo_proj)
+    data_crs = ccrs.PlateCarree()
+
+    ax.set_extent([lon_min, lon_max, lat_min, lat_max], data_crs)
+    ax.set_title(f"Optimized Arctic Route (Day {t_for_heat})")
+
+    ax.coastlines(resolution='50m', color='black', linewidth=0.8)
+    ax.add_feature(cfeature.LAND, facecolor='lightgray')
+    ax.add_feature(cfeature.OCEAN, facecolor='skyblue')
+
+    lats, lons = make_latlon_grids(config.GRID_Y, config.GRID_X, lat_min, lat_max, lon_min, lon_max)
+    lon_2d, lat_2d = np.meshgrid(lons, lats)
+
+    im = ax.pcolormesh(
+        lon_2d,
+        lat_2d,
+        C,
+        transform=data_crs,
+        cmap='magma',
+        vmin=vmin,
+        vmax=vmax,
+        alpha=0.75,
+        shading='auto',
+    )
+
+    if path:
+        lats_of_path = np.array([lats[y] for _, y, _ in path])
+        lons_of_path = np.array([lons[x] for _, _, x in path])
+        ax.plot(
+            lons_of_path,
+            lats_of_path,
+            color='cyan',
+            linewidth=3,
+            marker='o',
+            markersize=4,
+            transform=data_crs,
+            label='Optimized Route',
+        )
+
+    fig.colorbar(im, ax=ax, orientation='vertical', label='Edge cost (a.u.)', pad=0.05)
+    ax.gridlines(draw_labels=True, dms=True, x_inline=False, y_inline=False)
+
+    plt.savefig(savepath, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+def latlon_to_grid_indices(lat: float, lon: float) -> Tuple[int, int]:
+    """Convert latitude/longitude to grid indices (y, x)."""
+    lat_clamped = max(min(lat, config.LAT_MAX), config.LAT_MIN)
+    lon_clamped = max(min(lon, config.LON_MAX), config.LON_MIN)
+    lat_span = config.LAT_MAX - config.LAT_MIN
+    lon_span = config.LON_MAX - config.LON_MIN
+    if lat_span == 0 or lon_span == 0:
+        raise ValueError("Invalid lat/lon span in config")
+    y = int(round((lat_clamped - config.LAT_MIN) / lat_span * (config.GRID_Y - 1)))
+    x = int(round((lon_clamped - config.LON_MIN) / lon_span * (config.GRID_X - 1)))
+    y = max(0, min(config.GRID_Y - 1, y))
+    x = max(0, min(config.GRID_X - 1, x))
+    return y, x
+
+
+def summarize_path_costs(
+    phys: PhysicalCost,
+    F: EnvFields,
+    path: List[Tuple[int, int, int]],
+    speeds: List[float],
+) -> pd.DataFrame:
     if not path or not speeds:
-        return pd.DataFrame()
-    totals = {"CO2e":0.0, "BC":0.0, "Noise":0.0, "Risk":0.0, "Forbidden":0.0}
-    for (t0,y1,x1),(t1,y2,x2),v in zip(path[:-1], path[1:], speeds):
-        br = edge_cost_breakdown(phys, F, t0, y2, x2, float(v))
-        for k in totals: totals[k] += br[k]
+        return pd.DataFrame({"Metric": ["(no path)"], "Value": ["-"], "Unit": ["-"]})
+    totals = {"CO2e": 0.0, "BC": 0.0, "Noise": 0.0, "Risk": 0.0, "Forbidden": 0}
+    for (t0, y0, x0), (t1, y1, x1), v in zip(path[:-1], path[1:], speeds):
+        breakdown = phys.edge_cost(2.7, float(v), F, t0, y1, x1)
+        totals["CO2e"] += breakdown * phys.w.w_fuel
+        totals["BC"] += breakdown * phys.w.w_bc
+        totals["Risk"] += breakdown * phys.w.w_risk
+        if breakdown > phys.w.bigM * 0.5:
+            totals["Forbidden"] += 1
     df = pd.DataFrame([
-        ("CO₂e (proxy)", totals["CO2e"], "a.u."),
+        ("CO2e (proxy)", totals["CO2e"], "a.u."),
         ("Black Carbon (proxy)", totals["BC"], "a.u."),
-        ("Underwater Noise (proxy)", totals["Noise"], "a.u."),
+        ("Noise (proxy)", totals["Noise"], "a.u."),
         ("Risk (unitless)", totals["Risk"], "a.u."),
-        ("Forbidden Zone Hits", totals["Forbidden"] / phys.w.bigM, "count")
-    ], columns=["Metric","Value","Unit"])
+        ("Forbidden Hits", totals["Forbidden"], "count"),
+    ], columns=["Metric", "Value", "Unit"])
     return df

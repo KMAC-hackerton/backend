@@ -1,83 +1,95 @@
-import numpy as np
-import pandas as pd
-from .schemas import RouteRequest, RouteResponse
-from config import EnvFields, VSET, DEFAULT_SAVE_PATH
-from models import NeuralCostFieldDL, PhysicalCost
-from app.exceptions import InvalidRequestException, PathNotFoundException
-from utils import (
-    astar_route_with_speeds, 
-    plot_route_visualization, 
-    summarize_path_costs
+from typing import List
+from fastapi.responses import FileResponse
+
+import torch
+import os
+
+from app.schemas import RouteRequest, RouteResponse
+from models import (
+    EnvFields,
+    PhysicalCost,
+    VesselSpec,
+    CostWeights,
+    CostParams,
+    TinyNCF,
+    NeuralCostFieldDL,
 )
+from utils import (
+    load_processed_env_fields,
+    astar_route_with_speeds,
+    plot_route_on_polar_stereo,
+    summarize_path_costs,
+    latlon_to_grid_indices,
+)
+import config
+
+from app.exceptions import CoordinateNotAllowException, PathNotFoundException
 
 class Service:
-    def __init__(self):
-        pass
-    def get_optimal_route(self, req: RouteRequest, F: EnvFields, 
-                      cost_model: NeuralCostFieldDL, 
-                      phys: PhysicalCost) -> RouteResponse:
-        T, Y, X = F.SIC.shape
+    def __init__(self) -> None:
+        self.F: EnvFields = load_processed_env_fields()
+        vessel = VesselSpec()
+        phys = PhysicalCost(vessel, CostWeights(), CostParams())
+        self.cost_model = NeuralCostFieldDL(self._load_model(), phys=phys)
 
-        if not (0 <= req.t_start_idx < T and 0 <= req.t_goal_idx < T):
-            raise InvalidRequestException()
-        if not (0 <= req.x_start < X and 0 <= req.y_start < Y and 
-                0 <= req.x_goal < X and 0 <= req.y_goal < Y):
-            raise InvalidRequestException()
-        if req.t_goal_idx <= req.t_start_idx:
-            raise InvalidRequestException()
+    def _load_model(self) -> TinyNCF:
+        model = TinyNCF()
+        if not config.MODEL_SAVE_PATH.exists():
+            raise RuntimeError(f"Model weights missing at {config.MODEL_SAVE_PATH}")
+        weights = torch.load(config.MODEL_SAVE_PATH, map_location=config.DEVICE)
+        model.load_state_dict(weights)
+        model.eval()
+        return model
 
-        start_node = (req.t_start_idx, req.y_start, req.x_start)
-        goal_node = (req.t_goal_idx, req.y_goal, req.x_goal)
-        print(f"[SERVICE] Finding route from {start_node} to {goal_node}...")
-        print(f"[SERVICE] Grid size: T={T}, Y={Y}, X={X}")
-
-        # 2. 핵심 로직: A* 알고리즘 호출
-        import time
-        t_start = time.time()
-        path, speeds, total_cost = astar_route_with_speeds(
-            F, cost_model, start_node, goal_node, VSET
-        )
-        t_elapsed = time.time() - t_start
-        print(f"[SERVICE] A* completed in {t_elapsed:.2f}s")
-
-        if not path:
-            print("[SERVICE] ❌ Route finding failed - no path found.")
-            raise PathNotFoundException()
-        
-        print(f"[SERVICE] ✅ Route found with {len(path)} nodes, total_cost={total_cost:.2f}")
-
-        save_vis_path = DEFAULT_SAVE_PATH
+    def get_optimal_route(self, req: RouteRequest) -> RouteResponse:
+        start_y, start_x = latlon_to_grid_indices(req.lat_start, req.lon_start)
+        goal_y, goal_x = latlon_to_grid_indices(req.lat_goal, req.lon_goal)
+        start_node = (req.t_start_idx, start_y, start_x)
+        goal_node = (req.t_goal_idx, goal_y, goal_x)
+        if not (0 <= start_x < config.GRID_X and 0 <= start_y < config.GRID_Y and 0 <= goal_x <= config.GRID_X and 0 <= goal_y <= config.GRID_Y):
+            raise CoordinateNotAllowException()
+        print(f"[Service] Finding route: {start_node} -> {goal_node}")
+        phys = self.cost_model.phys
+        if phys is None:
+            raise RuntimeError("Physical cost engine missing")
+        old_bcf = phys.vessel.bcf
+        old_w_fuel = phys.w.w_fuel
+        old_w_bc = phys.w.w_bc
+        old_w_risk = phys.w.w_risk
+        old_w_fuel_type = phys.vessel.fuel_type
+        phys.vessel.fuel_type = req.fuel_type
+        phys.vessel.bcf = req.BCF
+        phys.w.w_fuel = req.w_fuel
+        phys.w.w_bc = req.w_bc
+        phys.w.w_risk = req.w_risk
         try:
-            print("[SERVICE] 📊 Generating visualization...")
-            t_viz_start = time.time()
-            plot_route_visualization(F, cost_model, path, savepath=save_vis_path)
-            print(f"[SERVICE] Visualization saved in {time.time() - t_viz_start:.2f}s")
-        except Exception as e:
-            print(f"[SERVICE] ⚠️ Visualization failed: {e}")
-            save_vis_path = "N/A (Plotting failed)"
-        
-        # 4. 부가 로직: 비용 요약
-        print("[SERVICE] 📋 Summarizing costs...")
-        cost_summary_df = summarize_path_costs(phys, F, path, speeds)
-        print("[SERVICE] 🎉 Route processing complete!")
-        
-        # 안전 처리: speeds 또는 cost_summary_df가 None일 수 있으므로 기본값 부여
-        speeds_list = [] if speeds is None else [float(v) for v in speeds]
-
-        if cost_summary_df is None:
-            cost_summary_records = []
-        else:
-            cost_summary_records = [
-            {str(k): (v.item() if hasattr(v, "item") else v) for k, v in row.items()}
-            for row in cost_summary_df.to_dict(orient="records")
-            ]
-
+            path, speeds, total_cost = astar_route_with_speeds(self.F, self.cost_model, start_node, goal_node)
+        finally:
+            phys.vessel.bcf = old_bcf
+            phys.w.w_fuel = old_w_fuel
+            phys.w.w_bc = old_w_bc
+            phys.w.w_risk = old_w_risk
+        if not path or speeds is None:
+            raise PathNotFoundException()
+        vis_path = str(config.DEFAULT_VIS_PATH)
+        try:
+            plot_route_on_polar_stereo(self.F, self.cost_model, path, vis_path)
+        except Exception as exc:
+            print(f"[Service] Visualization failed: {exc}")
+            vis_path = ""
+        phys = self.cost_model.phys
+        if phys is None:
+            raise RuntimeError("Physical cost engine missing")
+        summary = summarize_path_costs(phys, self.F, path, speeds)
         return RouteResponse(
-            status="success",
-            path_nodes=path,
-            speeds_kn=speeds_list,
-            total_cost=float(total_cost),
-            path_length=len(path),
-            visualization_file=save_vis_path,
-            cost_summary=cost_summary_records,
+            visualization_file=vis_path,
+            cost_summary=[{str(k): v for k, v in row.items()} for row in summary.to_dict("records")],
+        )
+
+    def get_image(self, filename: str) -> FileResponse:
+        file_path = os.path.join(config.DEFAULT_VIS_PATH)
+        return FileResponse(
+            filename=filename,
+            media_type="image/png",
+            path=file_path
         )

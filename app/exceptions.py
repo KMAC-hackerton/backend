@@ -1,9 +1,8 @@
 from fastapi import HTTPException
 
-class InvalidRequestException(HTTPException):
+class CoordinateNotAllowException(HTTPException):
     def __init__(self):
-        super().__init__(status_code=400, detail="Invalid request parameters")
-
+        super().__init__(status_code=400, detail="Coordinates are out of allowed range")
 
 class PathNotFoundException(HTTPException):
     def __init__(self):
