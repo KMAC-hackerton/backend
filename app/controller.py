@@ -19,14 +19,35 @@ async def find_optimal_route(
     cost_model = request.app.state.ncf_cost_model
     phys_cost = request.app.state.phys_cost
 
+    print(f"[CONTROLLER] Received request: start=({route_request.t_start_idx},{route_request.y_start},{route_request.x_start}), "
+          f"goal=({route_request.t_goal_idx},{route_request.y_goal},{route_request.x_goal})")
+
     # Service.get_optimal_route는 CPU 바운드(동기) 함수이므로
     # asyncio.to_thread로 스레드풀에서 실행해 비동기 엔드포인트에서 await 가능하도록 처리.
-    result = await asyncio.to_thread(
-        service.get_optimal_route,
-        req=route_request,
-        F=F,
-        cost_model=cost_model,
-        phys=phys_cost,
-    )
-
-    return result
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                service.get_optimal_route,
+                req=route_request,
+                F=F,
+                cost_model=cost_model,
+                phys=phys_cost,
+            ),
+            timeout=300.0  # 5분 타임아웃
+        )
+        print("[CONTROLLER] ✅ Request completed successfully")
+        return result
+    except asyncio.TimeoutError:
+        print("[CONTROLLER] ❌ Request timed out after 300s")
+        return RouteResponse(
+            status="error",
+            path_nodes=[],
+            speeds_kn=[],
+            total_cost=0.0,
+            path_length=0,
+            visualization_file="N/A",
+            cost_summary=[{"error": "Request timed out - route computation took too long"}]
+        )
+    except Exception as e:
+        print(f"[CONTROLLER] ❌ Error during route computation: {e}")
+        raise

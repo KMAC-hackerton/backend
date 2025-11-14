@@ -28,28 +28,38 @@ class Service:
 
         start_node = (req.t_start_idx, req.y_start, req.x_start)
         goal_node = (req.t_goal_idx, req.y_goal, req.x_goal)
-        print(f"Finding route from {start_node} to {goal_node}...")
+        print(f"[SERVICE] Finding route from {start_node} to {goal_node}...")
+        print(f"[SERVICE] Grid size: T={T}, Y={Y}, X={X}")
 
         # 2. 핵심 로직: A* 알고리즘 호출
+        import time
+        t_start = time.time()
         path, speeds, total_cost = astar_route_with_speeds(
             F, cost_model, start_node, goal_node, VSET
         )
+        t_elapsed = time.time() - t_start
+        print(f"[SERVICE] A* completed in {t_elapsed:.2f}s")
 
         if not path:
-            print("Route finding failed.")
+            print("[SERVICE] ❌ Route finding failed - no path found.")
             raise PathNotFoundException()
         
-        print(f"Route found with {len(path)} nodes.")
+        print(f"[SERVICE] ✅ Route found with {len(path)} nodes, total_cost={total_cost:.2f}")
 
         save_vis_path = DEFAULT_SAVE_PATH
         try:
+            print("[SERVICE] 📊 Generating visualization...")
+            t_viz_start = time.time()
             plot_route_visualization(F, cost_model, path, savepath=save_vis_path)
+            print(f"[SERVICE] Visualization saved in {time.time() - t_viz_start:.2f}s")
         except Exception as e:
-            print(f"Warning: Visualization failed. {e}")
+            print(f"[SERVICE] ⚠️ Visualization failed: {e}")
             save_vis_path = "N/A (Plotting failed)"
         
         # 4. 부가 로직: 비용 요약
+        print("[SERVICE] 📋 Summarizing costs...")
         cost_summary_df = summarize_path_costs(phys, F, path, speeds)
+        print("[SERVICE] 🎉 Route processing complete!")
         
         # 안전 처리: speeds 또는 cost_summary_df가 None일 수 있으므로 기본값 부여
         speeds_list = [] if speeds is None else [float(v) for v in speeds]
