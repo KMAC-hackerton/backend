@@ -38,42 +38,71 @@ def load_processed_env_fields() -> EnvFields:
         raise RuntimeError(f"Error loading processed env data: {e}")
 
 # --- A* 경로 탐색 함수 ---
-def astar_route_with_speeds(F, cost_model, start, goal, vset, d_cell_nm=2.7, max_iterations=50000):
-    # (v3.4의 astar_route_with_speeds 함수 코드)
+# -------------------- A* 경로 탐색 함수 --------------------
+def astar_route_with_speeds(F, cost_model, start, goal, vset, d_cell_nm=2.7):
+    """
+    시간 확장 A* 알고리즘을 사용하여 환경 비용이 최소인 경로를 찾습니다.
+    :param F: EnvFields 객체 (환경 데이터)
+    :param cost_model: NeuralCostFieldDL 객체 (비용 예측 모델)
+    :param start: 시작 노드 (t0, y0, x0)
+    :param goal: 목표 노드 (tG, yG, xG)
+    :param vset: 후보 속력 집합 [kn]
+    :param d_cell_nm: 격자 셀 간 거리 (해리)
+    :return: path, speeds, total_cost
+    """
     T,Y,X = F.SIC.shape
     (t0,y0,x0), (tG,yG,xG) = start, goal
+    
+    # 경계 검사 함수
     def inb(t,y,x): return 0<=t<T and 0<=y<Y and 0<=x<X
+    
+    # 휴리스틱 함수 (직선 거리)
     def h(t,y,x): return math.hypot(y-yG, x-xG)*d_cell_nm*1.0
+    
+    # 이웃 노드 (상하좌우 및 제자리)
     NEIGH = [(-1,0),(1,0),(0,-1),(0,1),(0,0)]
+    
+    # 우선순위 큐: (f_cost, g_cost, node)
     pq = []; heapq.heappush(pq, (h(t0,y0,x0), 0.0, (t0,y0,x0)))
+    
     g_cost, parent, best_speed_to = {(t0,y0,x0):0.0}, {}, {}
-    iteration_count = 0
+    
     while pq:
-        iteration_count += 1
-        if iteration_count > max_iterations:
-            print(f"⚠️ A* 조기 종료: {max_iterations}회 반복 초과 (목표 미도달)")
-            return None, None, float("inf")
-        if iteration_count % 5000 == 0:
-            print(f"[A*] 진행: {iteration_count}회, 큐={len(pq)}, 방문={len(g_cost)}")
         f, gc, node = heapq.heappop(pq)
         t,y,x = node
+        
+        # 목표 도달
         if node == (tG,yG,xG):
             path=[node]; speeds=[]
             while node in parent:
                 speeds.append(best_speed_to[node]); node=parent[node]; path.append(node)
             return list(reversed(path)), list(reversed(speeds)), gc
+            
+        # 다음 시간 단계 (t+1)
         nt = t+1
+        
+        # 현재 시간에서 이웃 노드로 이동 탐색
         for dy,dx in NEIGH:
             ny,nx = y+dy, x+dx
+            
+            # 격자 및 시간 경계 검사
             if not inb(nt,ny,nx): continue
+            
             best_c, best_v = float("inf"), None
+            
+            # 후보 속력별 최소 비용 선택
             for v in vset:
-                c = cost_model.predict(2.7, float(v), F, t, ny, nx)
+                # 모델을 통해 엣지 비용 예측
+                c = cost_model.predict(2.7, float(v), F, t, ny, nx) 
                 if c < best_c: best_c, best_v = c, v
+                
+            # 새로운 g_cost 계산 및 갱신
             ng = gc + best_c; nnode = (nt,ny,nx)
+            
             if ng < g_cost.get(nnode, float("inf")):
                 g_cost[nnode]=ng; parent[nnode]=(t,y,x); best_speed_to[nnode]=best_v
                 heapq.heappush(pq, (ng + h(nt,ny,nx), ng, nnode))
+                
     return None, None, float("inf")
 
 # --- 리포팅/시각화 함수 ---
