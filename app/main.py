@@ -1,30 +1,32 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import numpy as np
 import random
 
 import config
 from app.controller import api_router
-from app.services import Service
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     np.random.seed(config.SEED)
     random.seed(config.SEED)
-    try:
-        service = Service()
-    except Exception as exc:
-        print(f"[lifespan] Failed to initialize Service: {exc}")
-        raise
-    app.state.service = service
-    print("[lifespan] Service initialized")
+    print("[lifespan] Application started")
     yield
     print("[lifespan] Shutdown finishing")
 
 
 app = FastAPI(
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(api_router)

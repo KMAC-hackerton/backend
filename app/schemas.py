@@ -1,6 +1,5 @@
-from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Dict, Any
 
 
 class RouteRequest(BaseModel):
@@ -18,19 +17,5 @@ class RouteRequest(BaseModel):
 
 
 class RouteResponse(BaseModel):
-    visualization_file: str  # 이미지 파일 경로 또는 Base64 인코딩된 문자열
-    cost_summary: List[Dict[str, Any]]
-
-
-class RouteResponseWithBase64(BaseModel):
-    """Base64로 인코딩된 이미지를 포함하는 응답"""
-    visualization_base64: str  # data:image/png;base64,... 형식
-    visualization_filename: str  # 원본 파일명
-    cost_summary: List[Dict[str, Any]]
-
-
-class RouteResponseWithURL(BaseModel):
-    """이미지 URL을 포함하는 응답"""
-    visualization_url: str  # 이미지 접근 URL
-    visualization_filename: str  # 파일명
+    visualization_image: bytes  # PNG 이미지 바이트
     cost_summary: List[Dict[str, Any]]
