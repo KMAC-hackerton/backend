@@ -2,6 +2,7 @@ from typing import Annotated
 from fastapi import APIRouter, Request, Depends, HTTPException
 from fastapi.responses import Response
 import asyncio
+import json
 
 from app.schemas import RouteRequest, RouteResponse
 from app.services import Service
@@ -16,11 +17,13 @@ async def find_optimal_route(
 ) -> Response:
     try:
         result = await asyncio.to_thread(service.get_optimal_route, route_request)
+        cost_summary_json = json.dumps(result.cost_summary, ensure_ascii=False)
+        print(f"[Controller] Cost summary: {cost_summary_json}")
         return Response(
             content=result.visualization_image,
             media_type="image/png",
             headers={
-                "X-Cost-Summary": str(result.cost_summary)
+                "X-Cost-Summary": cost_summary_json
             }
         )
     except Exception as exc:
