@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 import config
-from models import EnvFields, PhysicalCost, NeuralCostFieldDL
+from models import EnvFields, PhysicalCost, NeuralCostFieldDL, CostWeights
 
 try:
     import cartopy.crs as ccrs  # type: ignore[import]
@@ -46,71 +46,98 @@ def astar_route_with_speeds(
     goal: Tuple[int, int, int],
     vset: Tuple[float, ...] = config.VSET,
     d_cell_nm: float = 2.7,
-    max_iterations: int = 50000,
+    max_expansions: int = 200000,
 ) -> Tuple[Optional[List[Tuple[int, int, int]]], Optional[List[float]], float]:
+    """
+    시간 축은 항상 t+1 로만 진행.
+    - goal의 시간 인덱스를 tG로 두고, t >= tG 인 노드는 더 이상 확장하지 않음.
+    - 탐색 노드 개수가 max_expansions를 넘으면 강제 중단하고 (None, None, inf) 리턴.
+    """
     T, Y, X = F.SIC.shape
     (t0, y0, x0), (tG, yG, xG) = start, goal
 
-    def in_bounds(t, y, x):
+    def inb(t, y, x):
         return 0 <= t < T and 0 <= y < Y and 0 <= x < X
 
-    def heuristic(t, y, x):
-        spatial = abs(y - yG) + abs(x - xG)
-        time_dist = max(0, tG - t)
-        return spatial * d_cell_nm * 0.5 + time_dist * 2.0
+    def h(t, y, x):
+        # 공간 거리 기반 휴리스틱
+        return math.hypot(y - yG, x - xG) * d_cell_nm * 1.0
+
+    NEIGH = [(-1, 0), (1, 0), (0, -1), (0, 1), (0, 0)]
 
     pq = []
-    heapq.heappush(pq, (heuristic(t0, y0, x0), 0.0, (t0, y0, x0)))
+    heapq.heappush(pq, (h(t0, y0, x0), 0.0, (t0, y0, x0)))
     g_cost = {(t0, y0, x0): 0.0}
     parent = {}
-    best_speed = {}
-    visited = set()
-    iteration = 0
+    best_speed_to = {}
+
+    expansions = 0
 
     while pq:
-        iteration += 1
-        if iteration > max_iterations:
-            print(f"⚠️ A* exceeded {max_iterations} iterations")
-            return None, None, float('inf')
-        if iteration % 5000 == 0:
-            print(f"[A*] Iter {iteration}, queue={len(pq)}, visited={len(visited)}")
-        _, gc, node = heapq.heappop(pq)
-        if node in visited:
-            continue
-        visited.add(node)
+        f, gc, node = heapq.heappop(pq)
         t, y, x = node
+
+        # 이미 더 좋은 경로가 등록되어 있으면 스킵
+        if gc > g_cost.get(node, float("inf")):
+            continue
+
+        # 목표 도달
         if node == (tG, yG, xG):
             path = [node]
             speeds = []
             while node in parent:
-                speeds.append(best_speed[node])
+                speeds.append(best_speed_to[node])
                 node = parent[node]
                 path.append(node)
             return list(reversed(path)), list(reversed(speeds)), gc
-        nt = t + 1
-        if nt >= T:
+
+        # 목표 시간 tG를 넘은 노드는 확장하지 않음
+        if t >= tG:
             continue
-        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1), (0, 0)]:
+
+        expansions += 1
+        if expansions > max_expansions:
+            # 탐색 과도 → 실패 처리
+            break
+
+        nt = t + 1
+        if nt > tG:
+            # 목표 시간보다 더 나중 시간은 볼 필요 없음
+            continue
+
+        for dy, dx in NEIGH:
             ny, nx = y + dy, x + dx
-            if not in_bounds(nt, ny, nx):
+            if not inb(nt, ny, nx):
                 continue
-            nnode = (nt, ny, nx)
-            if nnode in visited:
+
+            # 하드 포비든 셀은 아예 확장 안 함
+            if F.forbid_mask[nt, ny, nx] > 0.5:
                 continue
-            best_c = float('inf')
-            best_v = None
+
+            best_c, best_v = float("inf"), None
             for v in vset:
-                c = cost_model.predict(d_cell_nm, float(v), F, nt, ny, nx)
+                c = cost_model.predict(d_cell_nm, float(v), F, t, ny, nx)
+                # Big-M 수준의 비용은 사실상 막힌 셀로 간주하고 스킵
+                if c >= CostWeights().bigM * 0.5:
+                    continue
                 if c < best_c:
-                    best_c = c
-                    best_v = v
+                    best_c, best_v = c, v
+
+            # 모든 속도가 Big-M 수준이면 이 이웃은 봉인
+            if best_v is None:
+                continue
+
             ng = gc + best_c
-            if ng < g_cost.get(nnode, float('inf')):
+            nnode = (nt, ny, nx)
+
+            if ng < g_cost.get(nnode, float("inf")):
                 g_cost[nnode] = ng
-                parent[nnode] = node
-                best_speed[nnode] = best_v
-                heapq.heappush(pq, (ng + heuristic(nt, ny, nx), ng, nnode))
-    return None, None, float('inf')
+                parent[nnode] = (t, y, x)
+                best_speed_to[nnode] = best_v
+                heapq.heappush(pq, (ng + h(nt, ny, nx), ng, nnode))
+
+    # 여기까지 왔다는 건 목표까지 경로를 찾지 못했다는 뜻
+    return None, None, float("inf")
 
 
 def compute_cost_map(F: EnvFields, cost_model: NeuralCostFieldDL, t: int, vset: Tuple[float, ...] = config.VSET) -> np.ndarray:

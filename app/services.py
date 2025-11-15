@@ -108,7 +108,7 @@ class Service:
         
         try:
             path, speeds, total_cost = astar_route_with_speeds(
-                self.F, self.cost_model, start_node, goal_node
+                self.F, self.cost_model, start_node, goal_node, vset=config.VSET
             )
         finally:
             # 원래 파라미터로 복원

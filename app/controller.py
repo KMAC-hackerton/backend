@@ -26,5 +26,7 @@ async def find_optimal_route(
                 "X-Cost-Summary": cost_summary_json
             }
         )
+    except HTTPException:
+        raise  # HTTPException은 그대로 전파
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc))
